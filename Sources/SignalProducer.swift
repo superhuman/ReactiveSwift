@@ -608,10 +608,10 @@ extension SignalProducer {
 
 	/// Creates a `Signal` from the producer.
 	///
-	/// This is equivalent to `SignalProducer.startWithSignal`, but it has 
-	/// the downside that any values emitted synchronously upon starting will 
+	/// This is equivalent to `SignalProducer.startWithSignal`, but it has
+	/// the downside that any values emitted synchronously upon starting will
 	/// be missed by the observer, because it won't be able to subscribe in time.
-	/// That's why we don't want this method to be exposed as `public`, 
+	/// That's why we don't want this method to be exposed as `public`,
 	/// but it's useful internally.
 	internal func startAndRetrieveSignal() -> Signal<Value, Error> {
 		var result: Signal<Value, Error>!
@@ -856,7 +856,7 @@ extension SignalProducer {
 	public func map<U>(_ transform: @escaping (Value) -> U) -> SignalProducer<U, Error> {
 		return core.flatMapEvent(Signal.Event.map(transform))
 	}
-	
+
 	/// Map each value in the producer to a new constant value.
 	///
 	/// - parameters:
@@ -892,17 +892,17 @@ extension SignalProducer {
 	/// Maps each value in the producer to a new value, lazily evaluating the
 	/// supplied transformation on the specified scheduler.
 	///
-	/// - important: Unlike `map`, there is not a 1-1 mapping between incoming 
-	///              values, and values sent on the returned producer. If 
-	///              `scheduler` has not yet scheduled `transform` for 
-	///              execution, then each new value will replace the last one as 
+	/// - important: Unlike `map`, there is not a 1-1 mapping between incoming
+	///              values, and values sent on the returned producer. If
+	///              `scheduler` has not yet scheduled `transform` for
+	///              execution, then each new value will replace the last one as
 	///              the parameter to `transform` once it is finally executed.
 	///
 	/// - parameters:
 	///   - transform: The closure used to obtain the returned value from this
 	///                producer's underlying value.
 	///
-	/// - returns: A producer that, when started, sends values obtained using 
+	/// - returns: A producer that, when started, sends values obtained using
 	///            `transform` as this producer sends values.
 	public func lazyMap<U>(on scheduler: Scheduler, transform: @escaping (Value) -> U) -> SignalProducer<U, Error> {
 		return core.flatMapEvent(Signal.Event.lazyMap(on: scheduler, transform: transform))
@@ -1103,7 +1103,7 @@ extension SignalProducer {
 	/// given producer.
 	///
 	/// - note: The returned producer will not send a value until both inputs
-	///         have sent at least one value each. 
+	///         have sent at least one value each.
 	///
 	/// - note: If either producer is interrupted, the returned producer will
 	///         also be interrupted.
@@ -1119,7 +1119,7 @@ extension SignalProducer {
 	public func combineLatest<U>(with other: SignalProducer<U, Error>) -> SignalProducer<(Value, U), Error> {
 		return SignalProducer.combineLatest(self, other)
 	}
-	
+
 	/// Combine the latest value of the receiver with the latest value from the
 	/// given producer.
 	///
@@ -1750,7 +1750,7 @@ extension SignalProducer {
 	/// completed yet, fails with `error` on `scheduler`.
 	///
 	/// - note: If the interval is 0, the timeout will be scheduled immediately.
-	///         The producer must complete synchronously (or on a faster 
+	///         The producer must complete synchronously (or on a faster
 	///         scheduler) to avoid the timeout.
 	///
 	/// - parameters:
@@ -1952,7 +1952,7 @@ extension SignalProducer {
 	/// Forward only those values from `self` that have unique identities across
 	/// the set of all values that have been seen.
 	///
-	/// - note: This causes the identities to be retained to check for 
+	/// - note: This causes the identities to be retained to check for
 	///         uniqueness.
 	///
 	/// - parameters:
@@ -2231,7 +2231,7 @@ extension SignalProducer {
 			let setup = producers.map {
 				(producer: $0.producer, pipe: Signal<Value, Error>.pipe())
 			}
-			
+
 			guard !setup.isEmpty else {
 				if let emptySentinel = emptySentinel {
 					observer.send(value: emptySentinel)
@@ -2242,7 +2242,7 @@ extension SignalProducer {
 			}
 
 			lifetime += transform(AnySequence(setup.lazy.map { $0.pipe.output })).observe(observer)
-			
+
 			for (producer, pipe) in setup {
 				lifetime += producer.start(pipe.input)
 			}
@@ -2300,6 +2300,79 @@ extension SignalProducer {
 			}
 
 			iterate(count)
+		}
+	}
+
+	/// Repeat `self` until `shouldContinue` returns false, at which point the returned
+	/// producer will complete.
+	///
+	/// - parameters:
+	///   - shouldContinue: A closure that accepts the latest value from the `value` event
+	///                     and determines whether the repeating should continue.
+	///
+	/// - returns: A signal producer start sequentially starts `self` after
+	///            previously started producer completes.
+	func `repeat`(while shouldContinue: @escaping (Value) -> Bool) -> SignalProducer<Value, Error> {
+		return self.repeat { value -> SignalProducer<Bool, Never> in
+			return SignalProducer<Bool, Never>(value: shouldContinue(value))
+		}
+	}
+
+	/// Repeat `self` until the value from the SignalProducer returned by `shouldContinue` is false,
+	/// at which point the returned producer will complete.
+	///
+	/// - parameters:
+	///   - shouldContinue: A closure that accepts the latest value from the `value` event
+	///                     and returns a SignalProducer, determining whether the repeating should
+	///                     continue.
+	///
+	/// - returns: A signal producer start sequentially starts `self` after
+	///            previously started producer completes.
+	func `repeat`(while shouldContinue: @escaping (Value) -> SignalProducer<Bool, Never>) -> SignalProducer<Value, Error> {
+		return SignalProducer { observer, lifetime in
+			let serialDisposable = SerialDisposable()
+			lifetime += serialDisposable
+
+			func iterate() {
+				var lastValue: Value?
+
+				self.startWithSignal { signal, signalDisposable in
+					let compositeDisposable = CompositeDisposable([signalDisposable])
+					serialDisposable.inner = compositeDisposable
+
+					signal.observe { event in
+						if case .completed = event {
+							if let value = lastValue {
+								compositeDisposable += shouldContinue(value)
+									.take(first: 1)
+									.start({ action in
+										switch action {
+										case .value(let `continue`):
+											if `continue` {
+												iterate()
+											} else {
+												observer.sendCompleted()
+											}
+										case .completed:
+											break
+										case .interrupted:
+											observer.sendCompleted()
+										}
+									})
+							} else {
+								observer.sendCompleted()
+							}
+						} else if case .value(let value) = event {
+							lastValue = value
+							observer.send(event)
+						} else {
+							observer.send(event)
+						}
+					}
+				}
+			}
+
+			iterate()
 		}
 	}
 
@@ -2758,7 +2831,7 @@ extension SignalProducer where Value == Bool {
 	public func and<Booleans: SignalProducerConvertible>(_ booleans: Booleans) -> SignalProducer<Value, Error> where Booleans.Value == Value, Booleans.Error == Error {
 		return and(booleans.producer)
 	}
-	
+
 	/// Create a producer that computes a logical AND between the latest values of `booleans`.
 	///
 	/// If no producer is given in `booleans`, the resulting producer constantly emits `true`.
@@ -2770,7 +2843,7 @@ extension SignalProducer where Value == Bool {
 	public static func all<BooleansCollection: Collection>(_ booleans: BooleansCollection) -> SignalProducer<Value, Error> where BooleansCollection.Element == SignalProducer<Value, Error> {
 		return combineLatest(booleans, emptySentinel: []).map { $0.reduce(true) { $0 && $1 } }
 	}
-	
+
 	/// Create a producer that computes a logical AND between the latest values of `booleans`.
     ///
     /// If no producer is given in `booleans`, the resulting producer constantly emits `true`.
@@ -2804,7 +2877,7 @@ extension SignalProducer where Value == Bool {
 	public func or<Booleans: SignalProducerConvertible>(_ booleans: Booleans) -> SignalProducer<Value, Error> where Booleans.Value == Value, Booleans.Error == Error {
 		return or(booleans.producer)
 	}
-	
+
 	/// Create a producer that computes a logical OR between the latest values of `booleans`.
 	///
 	/// If no producer is given in `booleans`, the resulting producer constantly emits `false`.
@@ -2816,7 +2889,7 @@ extension SignalProducer where Value == Bool {
 	public static func any<BooleansCollection: Collection>(_ booleans: BooleansCollection) -> SignalProducer<Value, Error> where BooleansCollection.Element == SignalProducer<Value, Error> {
 		return combineLatest(booleans, emptySentinel: []).map { $0.reduce(false) { $0 || $1 } }
 	}
-	
+
 	/// Create a producer that computes a logical OR between the latest values of `booleans`.
 	///
 	/// If no producer is given in `booleans`, the resulting producer constantly emits `false`.

@@ -2535,6 +2535,94 @@ class SignalProducerSpec: QuickSpec {
 			}
 		}
 
+		describe("repeat while") {
+			it("should start a signal while should continue returns true") {
+				let original = SignalProducer<Int, Never>([ 1, 2, 3 ])
+				var times = 0
+				let producer = original.repeat { (value) -> Bool in
+					times += 1
+					return times < 3
+				}
+
+				let result = producer.collect().single()
+				expect(result?.value) == [ 1, 2, 3, 1, 2, 3, 1, 2, 3 ]
+			}
+
+			it("should start a signal while should continue returns true async") {
+				let globalQueue: DispatchQueue
+				if #available(*, OSX 10.10) {
+					globalQueue = DispatchQueue.global()
+				} else {
+					globalQueue = DispatchQueue.global(priority: .default)
+				}
+
+				let original = SignalProducer<Int, Never>([ 1, 2, 3 ])
+				var times = 0
+				let producer = original.repeat { (value) -> SignalProducer<Bool, Never> in
+					return SignalProducer { observer, _ in
+						globalQueue.async() {
+							times += 1
+							observer.send(value: times < 3)
+							observer.sendCompleted()
+						}
+					}
+				}
+
+				let result = producer.collect().single()
+				expect(result?.value) == [ 1, 2, 3, 1, 2, 3, 1, 2, 3 ]
+			}
+
+			it("should produce an equivalent signal producer if not continued") {
+				let original = SignalProducer<Int, Never>([ 1, 2, 3 ])
+				let producer = original.repeat { _ in false }
+
+				let result = producer.collect().single()
+				expect(result?.value) == [ 1, 2, 3 ]
+			}
+
+			it("should not continue repeating upon error") {
+				let results: [Result<Int, TestError>] = [
+					.success(1),
+					.success(2),
+					.failure(.default),
+				]
+
+				let original = SignalProducer.attemptWithResults(results)
+				let producer = original.repeat { _ in true }
+
+				let events = producer
+					.materialize()
+					.collect()
+					.single()
+				let result = events?.value
+
+				let expectedEvents: [Signal<Int, TestError>.Event] = [
+					.value(1),
+					.value(2),
+					.failed(.default),
+				]
+
+				// TODO: if let result = result where result.count == expectedEvents.count
+				if result?.count != expectedEvents.count {
+					fail("Invalid result: \(String(describing: result))")
+				} else {
+					// Can't test for equality because Array<T> is not Equatable,
+					// and neither is Signal<Value, Error>.Event.
+					expect(result![0] == expectedEvents[0]) == true
+					expect(result![1] == expectedEvents[1]) == true
+					expect(result![2] == expectedEvents[2]) == true
+				}
+			}
+
+			it("continuing should evaluate lazily") {
+				let original = SignalProducer<Int, Never>(value: 1)
+				let producer = original.repeat { _ in true }
+
+				let result = producer.take(first: 1).single()
+				expect(result?.value) == 1
+			}
+		}
+
 		describe("retry") {
 			it("should start a signal N times upon error") {
 				let results: [Result<Int, TestError>] = [
